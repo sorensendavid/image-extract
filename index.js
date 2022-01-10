@@ -7,10 +7,10 @@ const stream = require('stream')
 const https = require('https')
 
 // Define some configuration constants our app requires.
-const sourceDirectory = './'
+const sourceDirectory = 'data'
 const imageOutputDirectory = 'image-output'
 const allowedExtensions = ['.csv'] // Array of String filetypes we want to look inside.
-const urlRegex = /(https?:\/\/cdn.discordapp.com\/attachments[^\s]+)/gi // Regex/Regular Expression that we expect to find.
+const urlRegex = /(https?:\/\/cdn.discordapp.com\/attachments[^\s]+(.png|.gif|.jpg|.jpeg|.bmp))/gi // Regex/Regular Expression that we expect to find.
 
 // Define 'container' constants to hold data we find.
 const filePaths = []
@@ -30,7 +30,11 @@ const createUUID = () => {
 // Accepts an array of dirent (directory entities - things that exist within a directory - files/folders)
 // Returns an array of directory names as strings
 const getDirectories = (entities) =>
-  entities.filter((dirent) => dirent.isDirectory()).map((dirent) => dirent.name)
+  entities.filter((dirent) => dirent.isDirectory()).map((dirent) => {
+  console.log(dirent.name)
+  console.log(imageOutputDirectory)
+    return dirent.name
+  })
 
 // Accepts an array of dirent (directory entities - things that exist within a directory - files/folders)
 // Returns an array of file names as strings
@@ -43,9 +47,11 @@ const getFiles = (entities) =>
 
 // Recursively looks inside a directory and returns all contents as an array of dirent (directory entities - things that exist within a directory - files/folders)
 const getFilePaths = (dir) => {
-  const entities = readdirSync(dir, { withFileTypes: true })
+  console.log(`Reading ${dir}`)
+  const entities = readdirSync(path.join('./', dir), { withFileTypes: true })
   getFiles(entities).forEach((file) => filePaths.push(path.join(dir, file)))
   getDirectories(entities).forEach((d) => getFilePaths(path.join(dir, d)))
+  console.log(filePaths)
 }
 
 // Accepts a string of a file that includes the path.
@@ -53,6 +59,7 @@ const getFilePaths = (dir) => {
 // Returns a Promise - an asynchronous 'task' which can be resolved (success) or reject(ed) (failed)
 const searchFile = (file) => {
   return new Promise((resolve) => {
+    console.log(`Searching: ${file}`)
     const inStream = createReadStream(file)
     const outStream = new stream()
     const readline = createInterface(inStream, outStream)
@@ -81,17 +88,34 @@ const getImageUrls = async () => Promise.all(filePaths.map(async (file) => searc
 
 // Download the image to output directory
 const downloadImage = (imageUrl) => {
-  const filename = url.parse(imageUrl).pathname.split('/').pop()
-  https.get(imageUrl, (response) =>
-    response.pipe(createWriteStream(path.join(imageOutputDirectory, `${createUUID()}_${filename}`)))
-  )
+  return new Promise((resolve,reject)=>{
+    const filename = url.parse(imageUrl).pathname.split('/').pop()
+    try {
+      console.log(`Downloading: ${imageUrl}`)
+      https.get(imageUrl, (response) => {
+        response.pipe(createWriteStream(path.join(imageOutputDirectory, `${createUUID()}_${filename}`)))
+        response.on('end', ()=> {
+          console.log(`Finished ${filename}`)
+          resolve()
+        })
+        response.on('error', (error) => {
+          throw new Error(error.message)
+        })
+      })
+    } catch (error) {
+      console.log(error.message, imageUrl)
+      reject()
+    }
+  })
 }
 
 // Check if image output directory exists, if not, create it.
 const makeOutputDirectory = () => {
-  const dir = path.join(sourceDirectory, imageOutputDirectory)
-  if (!existsSync(dir)) {
-    mkdirSync(dir)
+  if (!existsSync(imageOutputDirectory)) {
+    console.log(`${imageOutputDirectory} does not exist. Creating.`)
+    mkdirSync(imageOutputDirectory)
+  } else {
+    console.log(`${imageOutputDirectory} exists.`)
   }
 }
 
@@ -99,14 +123,17 @@ const makeOutputDirectory = () => {
 // IIFE (Immediately Invoked Function Expression) - Silly, but required to use async/await (for asynchronous code) in global scope
 // Defining the function we want to invoke as an anonymous function within the first pair (). Second empty pair () invokes the function.
 ;(async () => {
+  console.log('Getting file paths...')
   // Synchronously populate the global filePaths array with files & paths to files that we want to search
   getFilePaths(sourceDirectory)
   // Asynchronously look through each file for URLs and wait until finished
+  console.log('Searching files for urls...')
   await getImageUrls()
   // Create output directy if needed
   makeOutputDirectory()
   // Go through all the URLs and download them
-  for (const url of imageURLs) {
-    downloadImage(url)
+  for (const imageUrl of imageURLs) {
+    await downloadImage(imageUrl)
   }
+  console.log('Finished!')
 })()
