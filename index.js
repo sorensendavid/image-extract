@@ -1,10 +1,18 @@
 // Define nodejs modules we'll need.
-const { readdirSync, createReadStream, createWriteStream, existsSync, mkdirSync } = require('fs')
+const {
+  readdirSync,
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+} = require('fs')
 const { createInterface } = require('readline')
 const url = require('url')
 const path = require('path')
 const stream = require('stream')
 const https = require('https')
+const { request } = require('http')
 
 // Define some configuration constants our app requires.
 const sourceDirectory = 'data'
@@ -15,6 +23,8 @@ const urlRegex = /(https?:\/\/cdn.discordapp.com\/attachments[^\s]+(.png|.gif|.j
 // Define 'container' constants to hold data we find.
 const filePaths = []
 const imageURLs = []
+const failedDownloads = []
+const downloadTimeout = 1000
 
 // Creates (unique enough) IDs. Using Math.random isnt guaranteed to be unique, but in our case it shouldn't matter.
 // Outputs a string similar to 0d87c0c7-9d7f-4f85-9bd3-7079ff2e02db that we'll use to prepend to filenames in case there are duplicates.
@@ -30,11 +40,13 @@ const createUUID = () => {
 // Accepts an array of dirent (directory entities - things that exist within a directory - files/folders)
 // Returns an array of directory names as strings
 const getDirectories = (entities) =>
-  entities.filter((dirent) => dirent.isDirectory()).map((dirent) => {
-  console.log(dirent.name)
-  console.log(imageOutputDirectory)
-    return dirent.name
-  })
+  entities
+    .filter((dirent) => dirent.isDirectory())
+    .map((dirent) => {
+      console.log(dirent.name)
+      console.log(imageOutputDirectory)
+      return dirent.name
+    })
 
 // Accepts an array of dirent (directory entities - things that exist within a directory - files/folders)
 // Returns an array of file names as strings
@@ -86,25 +98,86 @@ const searchFile = (file) => {
 // Asynchonously go through all files and search them for urls
 const getImageUrls = async () => Promise.all(filePaths.map(async (file) => searchFile(file)))
 
+const removeFromFailed = (url) => {
+  const index = failedDownloads.findIndex((element) => element === url)
+  failedDownloads.splice(index, 1)
+}
+
+const addToFailed = (url) => {
+  failedDownloads.push(url)
+}
+
+const deleteFile = (path) => {
+  try {
+    unlinkSync(path)
+    console.log(`**SUCCESS** (Clean up failed file) ${path}`)
+  } catch (error) {
+    console.error(`**ERROR** [deleteFile] (${error.message}) ${path}`)
+  }
+}
+
 // Download the image to output directory
 const downloadImage = (imageUrl) => {
-  return new Promise((resolve,reject)=>{
-    const filename = url.parse(imageUrl).pathname.split('/').pop()
+  return new Promise((resolve, reject) => {
     try {
-      console.log(`Downloading: ${imageUrl}`)
-      https.get(imageUrl, (response) => {
-        response.pipe(createWriteStream(path.join(imageOutputDirectory, `${createUUID()}_${filename}`)))
-        response.on('end', ()=> {
-          console.log(`Finished ${filename}`)
+      const filename = url.parse(imageUrl).pathname.split('/').pop()
+      const request = https.get(imageUrl, { timeout: 1000 })
+      request.setTimeout(10000, () => {
+        console.log('close connection')
+        request.destroy()
+      })
+      request.once('response', (response) => {
+        const filePath = path.join(imageOutputDirectory, `${createUUID()}_${filename}`)
+        const outFile = createWriteStream(filePath, { autoClose: false })
+
+        response.pipe(outFile)
+
+        outFile.on('finish', () => {
+          outFile.close()
+        })
+
+        outFile.on('error', (error) => {
+          console.log(`**ERROR** [response on error event] (${error.message}) ${filename}`)
+          outFile.close()
+          addToFailed(imageUrl)
+          deleteFile(filePath)
+        })
+
+        const timeout = setTimeout(() => {
+          console.log('close connection')
+          request.destroy()
+          outFile.close()
+          addToFailed(imageUrl)
+          deleteFile(filePath)
+          reject(new Error(`**FAILED** [setTimeout within response] (Timed Out) ${imageUrl} `))
+        }, downloadTimeout)
+
+        response.on('end', () => {
+          clearTimeout(timeout)
+          removeFromFailed(imageUrl)
+          console.log(`**SUCCESS** (Download Image) ${filename}`)
           resolve()
         })
+
         response.on('error', (error) => {
-          throw new Error(error.message)
+          console.log(`**ERROR** (GET ${imageUrl}) ${error.message}`)
+          reject(error)
         })
       })
+      request.on('timeout', () => {
+        console.log(`**TIME OUT** [request timeout event]`)
+      })
+      request.on('error', (error) => {
+        console.log(JSON.stringify(request, null, 2))
+        console.log(
+          `**ERROR** [request error event] (${error.code} - ${error.message}) ${imageUrl}`
+        )
+        console.log(error.stack)
+      })
     } catch (error) {
-      console.log(error.message, imageUrl)
-      reject()
+      console.log(
+        `**ERROR** [try/catch within downloadImage promise] (${error.message}) ${imageUrl}`
+      )
     }
   })
 }
@@ -133,7 +206,16 @@ const makeOutputDirectory = () => {
   makeOutputDirectory()
   // Go through all the URLs and download them
   for (const imageUrl of imageURLs) {
-    await downloadImage(imageUrl)
+    let successful = false
+    while (!successful) {
+      try {
+        await downloadImage(imageUrl)
+        successful = true
+      } catch (error) {
+        console.log(`**Retrying** ${imageUrl}`)
+        console.log(error.message)
+      }
+    }
   }
   console.log('Finished!')
 })()
